@@ -8,30 +8,37 @@ function authorized(req) {
 }
 
 async function fulfillScanOrder(order) {
-  const input = order.input || order.parameters || {};
-  const { skillName, sourceUrl, content } = input;
-  let text = content;
-  if (!text && sourceUrl) {
-    const r = await fetch(sourceUrl);
-    text = await r.text();
+  const brief = order.brief || "";
+  // Brief may contain a URL to the skill, or be the skill content itself.
+  let text = brief;
+  let sourceUrl = null;
+  const urlMatch = brief.match(/https?:\/\/\S+/);
+  if (urlMatch) {
+    sourceUrl = urlMatch[0];
+    try {
+      const r = await fetch(sourceUrl);
+      text = await r.text();
+    } catch (err) {
+      text = brief; // fall back to scanning the brief text itself
+    }
   }
-  const report = scanSkill({ skillName, content: text, source: sourceUrl || "order-input" });
-  const summary = `${report.verdict} — risk score ${report.score}/100. ${report.findings.length} finding(s).`;
-  return { summary, payload: JSON.stringify(report, null, 2) };
+  const report = scanSkill({ skillName: order.service_title || "submitted-skill", content: text, source: sourceUrl || "order-brief" });
+  return report;
 }
 
 async function fulfillBossOrder(order) {
-  // Subscription-style: acknowledge and point at /api/agents/watch for setup.
   return {
-    summary: "Agent Boss monitoring activated. POST your skill URLs to /api/agents/watch to start 24/7 tracking.",
-    payload: JSON.stringify({ setupEndpoint: "/api/agents/watch" }),
+    note: "Agent Boss monitoring activated for this order.",
+    setupEndpoint: "/api/agents/watch",
+    instructions: "POST your skill URLs to the setupEndpoint above to start 24/7 tracking.",
   };
 }
 
 async function fulfillConnectOrder(order) {
   return {
-    summary: "Agent Connections ready. POST a task + candidate agents to /api/agents/connect to spin up a bounty.",
-    payload: JSON.stringify({ setupEndpoint: "/api/agents/connect" }),
+    note: "Agent Connections ready for this order.",
+    setupEndpoint: "/api/agents/connect",
+    instructions: "POST a task + candidate agents to the setupEndpoint above to spin up a bounty.",
   };
 }
 
@@ -48,9 +55,9 @@ module.exports = async (req, res) => {
   }
 
   const serviceMap = {
-    [process.env.ATELIER_SCAN_SERVICE_ID]: { name: "scan", fn: fulfillScanOrder },
-    [process.env.ATELIER_BOSS_SERVICE_ID]: { name: "boss", fn: fulfillBossOrder },
-    [process.env.ATELIER_CONNECT_SERVICE_ID]: { name: "connect", fn: fulfillConnectOrder },
+    [process.env.ATELIER_SCAN_SERVICE_ID]: { name: "scan", fn: fulfillScanOrder, filename: "scan-report.json", contentType: "application/json" },
+    [process.env.ATELIER_BOSS_SERVICE_ID]: { name: "boss", fn: fulfillBossOrder, filename: "boss-setup.json", contentType: "application/json" },
+    [process.env.ATELIER_CONNECT_SERVICE_ID]: { name: "connect", fn: fulfillConnectOrder, filename: "connect-setup.json", contentType: "application/json" },
   };
 
   const result = { seen: 0, fulfilled: 0, skipped: 0, failed: 0, unmatched: [], errors: [] };
@@ -65,7 +72,7 @@ module.exports = async (req, res) => {
   result.seen = orders.length;
 
   for (const order of orders) {
-    const orderId = order.id || order.orderId;
+    const orderId = order.id;
     const doneKey = `fulfilled:${orderId}`;
     const already = await store.get(doneKey, false);
     if (already) {
@@ -73,16 +80,16 @@ module.exports = async (req, res) => {
       continue;
     }
 
-    const dispatch = serviceMap[order.serviceId || order.service_id];
+    const dispatch = serviceMap[order.service_id];
     if (!dispatch) {
-      result.unmatched.push({ orderId, serviceId: order.serviceId || order.service_id });
+      result.unmatched.push({ orderId, serviceId: order.service_id });
       continue;
     }
 
     try {
-      const { summary, payload } = await dispatch.fn(order);
-      const deliverableUrl = await atelier.storeDeliverable(orderId, payload);
-      await atelier.deliverOrder(creds.agentId, creds.apiKey, orderId, { summary, deliverableUrl });
+      const payload = await dispatch.fn(order);
+      const upload = await atelier.uploadDeliverable(creds.apiKey, payload, dispatch.filename, dispatch.contentType);
+      await atelier.deliverOrder(creds.apiKey, orderId, { deliverableUrl: upload.url, mediaType: upload.media_type || "text" });
       await store.set(doneKey, true, { exSeconds: 60 * 60 * 24 * 30 });
       result.fulfilled++;
     } catch (err) {

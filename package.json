@@ -1,0 +1,17 @@
+{
+  "name": "alpha-guardian",
+  "version": "1.0.0",
+  "description": "Alpha Guardian — security scanner + fleet monitor + multi-agent orchestrator for Claude/Gemini/ChatGPT agent skills.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "setup:atelier": "node scripts/setup-atelier.js",
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.34.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

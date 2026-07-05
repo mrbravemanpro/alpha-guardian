@@ -48,7 +48,7 @@ module.exports = async (req, res) => {
     return;
   }
 
-  const creds = await store.get("atelier:credentials", null);
+  const creds = await atelier.getCredentials();
   if (!creds) {
     res.status(200).json({ status: "not_registered", note: "Run scripts/setup-atelier.js first" });
     return;

@@ -7,23 +7,70 @@ function authorized(req) {
   return req.headers["authorization"] === `Bearer ${process.env.CRON_SECRET}`;
 }
 
+// Converts a Google Drive "view" share link into a direct-download URL.
+// Only works for files Drive doesn't force through its virus-scan
+// interstitial (roughly: smaller files). Large files may still fail --
+// that's a real Drive limitation, not something we can work around from a
+// server-side fetch.
+function driveViewToDirectDownload(url) {
+  const m = url.match(/drive\.google\.com\/file\/d\/([^/]+)/);
+  if (!m) return url;
+  return `https://drive.google.com/uc?export=download&id=${m[1]}`;
+}
+
+async function fetchSkillSource(url) {
+  const directUrl = driveViewToDirectDownload(url);
+  const r = await fetch(directUrl);
+  const text = await r.text();
+  // Drive's virus-scan interstitial page is HTML, not the real file --
+  // detect it so we don't silently "scan" a warning page as if it were code.
+  if (text.includes("Google Drive can't scan this file for viruses") || text.includes("<html")) {
+    throw new Error("Source returned an HTML page instead of raw file content (likely a Drive interstitial or auth wall, not the actual file)");
+  }
+  return text;
+}
+
 async function fulfillScanOrder(order) {
   const brief = order.brief || "";
-  // Brief may contain a URL to the skill, or be the skill content itself.
-  let text = brief;
-  let sourceUrl = null;
-  const urlMatch = brief.match(/https?:\/\/\S+/);
-  if (urlMatch) {
-    sourceUrl = urlMatch[0];
-    try {
-      const r = await fetch(sourceUrl);
-      text = await r.text();
-    } catch (err) {
-      text = brief; // fall back to scanning the brief text itself
-    }
+  // The actual file to scan lives in reference_urls, NOT embedded in the
+  // brief -- the brief is the client's instructions in plain English.
+  // reference_urls comes back as a JSON-encoded string from the API.
+  let referenceUrls = [];
+  try {
+    referenceUrls = typeof order.reference_urls === "string" ? JSON.parse(order.reference_urls) : (order.reference_urls || []);
+  } catch (_) {
+    referenceUrls = [];
   }
-  const report = scanSkill({ skillName: order.service_title || "submitted-skill", content: text, source: sourceUrl || "order-brief" });
-  return report;
+
+  // Fall back to a URL embedded directly in the brief text, if any, only
+  // after checking reference_urls first.
+  const candidateUrl = referenceUrls[0] || (brief.match(/https?:\/\/\S+/) || [])[0] || null;
+
+  if (!candidateUrl) {
+    return scanSkill({
+      skillName: order.service_title || "submitted-skill",
+      content: brief,
+      source: "order-brief-text-only",
+    });
+  }
+
+  try {
+    const text = await fetchSkillSource(candidateUrl);
+    return scanSkill({ skillName: order.service_title || "submitted-skill", content: text, source: candidateUrl });
+  } catch (err) {
+    // Be honest in the deliverable when we couldn't actually read the file,
+    // instead of silently scanning the wrong thing and returning a
+    // misleadingly clean "SAFE" result.
+    return {
+      skillName: order.service_title || "submitted-skill",
+      source: candidateUrl,
+      score: null,
+      verdict: "COULD_NOT_SCAN",
+      findings: [],
+      note: `Could not retrieve the file at the provided link to scan it: ${err.message}. Please re-share the file as a direct raw-text link (e.g. a raw GitHub URL, a public Pastebin raw link, or a Drive link with link-sharing set to "Anyone with the link" and the file under Drive's scan-size limit), and we'll re-deliver a corrected scan at no extra charge.`,
+      scannedAt: new Date().toISOString(),
+    };
+  }
 }
 
 async function fulfillBossOrder(order) {

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "atelier": {
+      "command": "npx",
+      "args": ["-y", "@atelier-ai/mcp"],
+      "env": { "ATELIER_API_KEY": "atelier_ddc889c50821dc9f9d43f42e20280dd32438ec057824b0ca" }
+    }
+  }
+}

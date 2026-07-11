@@ -1,17 +1,13 @@
 const store = require("../../lib/store");
 const atelier = require("../../lib/atelier");
 const { scanSkill } = require("../../lib/scanner/engine");
+const { renderReport } = require("../../lib/scanner/report");
 
 function authorized(req) {
   if (!process.env.CRON_SECRET) return true;
   return req.headers["authorization"] === `Bearer ${process.env.CRON_SECRET}`;
 }
 
-// Converts a Google Drive "view" share link into a direct-download URL.
-// Only works for files Drive doesn't force through its virus-scan
-// interstitial (roughly: smaller files). Large files may still fail --
-// that's a real Drive limitation, not something we can work around from a
-// server-side fetch.
 function driveViewToDirectDownload(url) {
   const m = url.match(/drive\.google\.com\/file\/d\/([^/]+)/);
   if (!m) return url;
@@ -22,8 +18,6 @@ async function fetchSkillSource(url) {
   const directUrl = driveViewToDirectDownload(url);
   const r = await fetch(directUrl);
   const text = await r.text();
-  // Drive's virus-scan interstitial page is HTML, not the real file --
-  // detect it so we don't silently "scan" a warning page as if it were code.
   if (text.includes("Google Drive can't scan this file for viruses") || text.includes("<html")) {
     throw new Error("Source returned an HTML page instead of raw file content (likely a Drive interstitial or auth wall, not the actual file)");
   }
@@ -32,9 +26,6 @@ async function fetchSkillSource(url) {
 
 async function fulfillScanOrder(order) {
   const brief = order.brief || "";
-  // The actual file to scan lives in reference_urls, NOT embedded in the
-  // brief -- the brief is the client's instructions in plain English.
-  // reference_urls comes back as a JSON-encoded string from the API.
   let referenceUrls = [];
   try {
     referenceUrls = typeof order.reference_urls === "string" ? JSON.parse(order.reference_urls) : (order.reference_urls || []);
@@ -42,8 +33,6 @@ async function fulfillScanOrder(order) {
     referenceUrls = [];
   }
 
-  // Fall back to a URL embedded directly in the brief text, if any, only
-  // after checking reference_urls first.
   const candidateUrl = referenceUrls[0] || (brief.match(/https?:\/\/\S+/) || [])[0] || null;
 
   if (!candidateUrl) {
@@ -58,9 +47,6 @@ async function fulfillScanOrder(order) {
     const text = await fetchSkillSource(candidateUrl);
     return scanSkill({ skillName: order.service_title || "submitted-skill", content: text, source: candidateUrl });
   } catch (err) {
-    // Be honest in the deliverable when we couldn't actually read the file,
-    // instead of silently scanning the wrong thing and returning a
-    // misleadingly clean "SAFE" result.
     return {
       skillName: order.service_title || "submitted-skill",
       source: candidateUrl,
@@ -102,9 +88,9 @@ module.exports = async (req, res) => {
   }
 
   const serviceMap = {
-    [process.env.ATELIER_SCAN_SERVICE_ID]: { name: "scan", fn: fulfillScanOrder, filename: "scan-report.json", contentType: "application/json" },
-    [process.env.ATELIER_BOSS_SERVICE_ID]: { name: "boss", fn: fulfillBossOrder, filename: "boss-setup.json", contentType: "application/json" },
-    [process.env.ATELIER_CONNECT_SERVICE_ID]: { name: "connect", fn: fulfillConnectOrder, filename: "connect-setup.json", contentType: "application/json" },
+    [process.env.ATELIER_SCAN_SERVICE_ID]: { name: "scan", fn: fulfillScanOrder, filename: "scan-report.md", contentType: "text/markdown", render: true },
+    [process.env.ATELIER_BOSS_SERVICE_ID]: { name: "boss", fn: fulfillBossOrder, filename: "boss-setup.json", contentType: "application/json", render: false },
+    [process.env.ATELIER_CONNECT_SERVICE_ID]: { name: "connect", fn: fulfillConnectOrder, filename: "connect-setup.json", contentType: "application/json", render: false },
   };
 
   const result = { seen: 0, fulfilled: 0, skipped: 0, failed: 0, unmatched: [], errors: [] };
@@ -135,7 +121,8 @@ module.exports = async (req, res) => {
 
     try {
       const payload = await dispatch.fn(order);
-      const upload = await atelier.uploadDeliverable(creds.apiKey, payload, dispatch.filename, dispatch.contentType);
+      const artifact = dispatch.render ? renderReport(payload) : payload;
+      const upload = await atelier.uploadDeliverable(creds.apiKey, artifact, dispatch.filename, dispatch.contentType);
       await atelier.deliverOrder(creds.apiKey, orderId, { deliverableUrl: upload.url, mediaType: upload.media_type || "text" });
       await store.set(doneKey, true, { exSeconds: 60 * 60 * 24 * 30 });
       result.fulfilled++;

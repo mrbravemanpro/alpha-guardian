@@ -1,4 +1,5 @@
 const { scanSkill } = require("../lib/scanner/engine");
+const { renderReport } = require("../lib/scanner/report");
 const store = require("../lib/store");
 
 module.exports = async (req, res) => {
@@ -21,8 +22,6 @@ module.exports = async (req, res) => {
 
   let fullContent = content;
 
-  // Allow scanning by URL (e.g. a raw GitHub link to SKILL.md or a skill's
-  // source file) instead of requiring the caller to paste content inline.
   if (!fullContent && sourceUrl) {
     try {
       const r = await fetch(sourceUrl);
@@ -40,11 +39,10 @@ module.exports = async (req, res) => {
   }
 
   const report = scanSkill({ skillName, content: fullContent, source: source || sourceUrl || "inline" });
+  const markdown = renderReport(report);
 
-  // Cache the report so repeat scans of the same skill are instant and so
-  // Agent Boss can pull recent scan history.
   const key = `scan:${(skillName || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "_")}:${Date.now()}`;
   await store.set(key, report, { exSeconds: 60 * 60 * 24 * 30 });
 
-  res.status(200).json(report);
+  res.status(200).json({ ...report, markdown });
 };

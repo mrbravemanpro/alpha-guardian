@@ -5,6 +5,7 @@
 
 const atelier = require("../../lib/atelier");
 const { scanSkill } = require("../../lib/scanner/engine");
+const { renderReport } = require("../../lib/scanner/report");
 
 function authorized(req) {
   if (!process.env.CRON_SECRET) return true;
@@ -63,7 +64,8 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const upload = await atelier.uploadDeliverable(creds.apiKey, report, "corrected-scan-report.json", "application/json");
+    const markdown = renderReport(report);
+    const upload = await atelier.uploadDeliverable(creds.apiKey, markdown, "corrected-scan-report.md", "text/markdown");
     const deliver = await atelier.deliverOrder(creds.apiKey, orderId, { deliverableUrl: upload.url, mediaType: upload.media_type || "text" });
     res.status(200).json({ status: "redelivered", report, upload, deliver });
   } catch (err) {
